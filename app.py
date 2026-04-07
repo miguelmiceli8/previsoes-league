@@ -13,9 +13,19 @@ Uso:
 
 import streamlit as st
 import pandas as pd
-import requests
+import sys
+import os
 
-API_BASE_URL = "http://localhost:8000"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from models.predict import (
+    get_all_players,
+    get_top_scorers,
+    get_top_cards,
+    get_top_assists,
+    get_top_fouls_committed,
+    get_top_fouls_drawn,
+)
 
 # Configuracao fixa: Premier League 2024
 LEAGUE_ID = 39
@@ -81,21 +91,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def fetch_data(endpoint: str, params: dict | None = None) -> list:
-    """Buscar dados do backend FastAPI."""
+def fetch_data(fn, **kwargs) -> list:
+    """Chama funcao do modelo com tratamento de erro."""
     try:
-        url = f"{API_BASE_URL}{endpoint}"
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        return data.get("data", [])
-    except requests.ConnectionError:
-        st.error(
-            "Nao foi possivel conectar a API. "
-            "Verifique se o servidor FastAPI esta rodando na porta 8000.\n\n"
-            "Execute: `uvicorn api.main:app --reload --port 8000`"
-        )
-        return []
+        return fn(**kwargs)
     except Exception as e:
         st.error(f"Erro ao buscar dados: {e}")
         return []
@@ -104,7 +103,7 @@ def fetch_data(endpoint: str, params: dict | None = None) -> list:
 def render_player_table(data: list, key_columns: dict) -> None:
     """Renderizar tabela estilizada de ranking de jogadores."""
     if not data:
-        st.warning("Nenhum dado disponivel. Execute o pipeline ETL primeiro.")
+        st.warning("Nenhum dado disponivel. Verifique a conexao com o banco.")
         return
 
     rows = []
@@ -140,7 +139,6 @@ def render_player_table(data: list, key_columns: dict) -> None:
 
 def main():
     """Aplicacao principal Streamlit."""
-    # Header tematico Premier League
     st.markdown("""
     <div class="premier-header">
         <h1>⚽ Previsoes League</h1>
@@ -150,28 +148,15 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Sidebar com configuracoes simplificadas
     st.sidebar.markdown("## ⚙️ Configuracoes")
     st.sidebar.markdown(
         "🏴󠁧󠁢󠁥󠁮󠁧󠁿 **Premier League** — Temporada **2024**"
     )
     st.sidebar.divider()
 
-    top_n = st.sidebar.slider(
-        "Top N Jogadores", min_value=3, max_value=20, value=5
-    )
-    min_apps = st.sidebar.slider(
-        "Min. de Jogos", min_value=1, max_value=30, value=5
-    )
+    top_n = st.sidebar.slider("Top N Jogadores", min_value=3, max_value=20, value=5)
+    min_apps = st.sidebar.slider("Min. de Jogos", min_value=1, max_value=30, value=5)
 
-    params = {
-        "league_id": LEAGUE_ID,
-        "season": SEASON,
-        "limit": top_n,
-        "min_appearances": min_apps,
-    }
-
-    # Abas de navegacao
     tab_goals, tab_cards, tab_assists, tab_fouls_c, tab_fouls_d, tab_all = (
         st.tabs([
             "🥅 Gols",
@@ -183,14 +168,14 @@ def main():
         ])
     )
 
-    # Aba 1: Gols
     with tab_goals:
         st.header("🥅 Maiores Artilheiros")
-        st.caption(
-            "Jogadores ranqueados por probabilidade de gol por jogo. "
-            "Probabilidade = gols / jogos x 100"
+        st.caption("Probabilidade = gols / jogos x 100")
+        data = fetch_data(
+            get_top_scorers,
+            league_id=LEAGUE_ID, season=SEASON,
+            limit=top_n, min_appearances=min_apps,
         )
-        data = fetch_data("/players/top-scorers", params)
         render_player_table(data, {
             "Gols": "goals",
             "Assist.": "assists",
@@ -199,19 +184,15 @@ def main():
             "Gols/Jogo": "goals_per_game",
             "Probabilidade": "goal_probability_pct",
         })
-
         if data:
             st.subheader("📊 Distribuicao de Gols por Jogo")
-            chart_df = pd.DataFrame(data)
-            chart_df = chart_df[["player", "goals_per_game"]].rename(
+            chart_df = pd.DataFrame(data)[["player", "goals_per_game"]].rename(
                 columns={"player": "Jogador", "goals_per_game": "Gols/Jogo"}
             )
             st.bar_chart(chart_df.set_index("Jogador"))
 
-    # Aba 2: Cartoes
     with tab_cards:
         st.header("🟨 Maiores Recebedores de Cartao")
-
         card_type = st.radio(
             "Tipo de Cartao",
             ["yellow", "red", "any"],
@@ -222,13 +203,12 @@ def main():
             }[x],
             horizontal=True,
         )
-
-        card_params = {**params, "card_type": card_type}
-        st.caption(
-            "Jogadores ranqueados por probabilidade de cartao por jogo. "
-            "Probabilidade = cartoes / jogos x 100"
+        st.caption("Probabilidade = cartoes / jogos x 100")
+        data = fetch_data(
+            get_top_cards,
+            league_id=LEAGUE_ID, season=SEASON,
+            limit=top_n, min_appearances=min_apps, card_type=card_type,
         )
-        data = fetch_data("/players/top-cards", card_params)
         render_player_table(data, {
             "Amarelos": "yellow_cards",
             "Vermelhos": "red_cards",
@@ -237,23 +217,21 @@ def main():
             "Cartoes/Jogo": "cards_per_game",
             "Probabilidade": "card_probability_pct",
         })
-
         if data:
             st.subheader("📊 Distribuicao de Cartoes por Jogo")
-            chart_df = pd.DataFrame(data)
-            chart_df = chart_df[["player", "cards_per_game"]].rename(
+            chart_df = pd.DataFrame(data)[["player", "cards_per_game"]].rename(
                 columns={"player": "Jogador", "cards_per_game": "Cartoes/Jogo"}
             )
             st.bar_chart(chart_df.set_index("Jogador"))
 
-    # Aba 3: Assistencias
     with tab_assists:
         st.header("🅰️ Maiores Assistentes")
-        st.caption(
-            "Jogadores ranqueados por probabilidade de assistencia por jogo. "
-            "Probabilidade = assistencias / jogos x 100"
+        st.caption("Probabilidade = assistencias / jogos x 100")
+        data = fetch_data(
+            get_top_assists,
+            league_id=LEAGUE_ID, season=SEASON,
+            limit=top_n, min_appearances=min_apps,
         )
-        data = fetch_data("/players/top-assists", params)
         render_player_table(data, {
             "Assist.": "assists",
             "Passes Chave": "key_passes",
@@ -262,25 +240,21 @@ def main():
             "Assist./Jogo": "assists_per_game",
             "Probabilidade": "assist_probability_pct",
         })
-
         if data:
             st.subheader("📊 Distribuicao de Assistencias por Jogo")
-            chart_df = pd.DataFrame(data)
-            chart_df = chart_df[["player", "assists_per_game"]].rename(
-                columns={
-                    "player": "Jogador",
-                    "assists_per_game": "Assist./Jogo",
-                }
+            chart_df = pd.DataFrame(data)[["player", "assists_per_game"]].rename(
+                columns={"player": "Jogador", "assists_per_game": "Assist./Jogo"}
             )
             st.bar_chart(chart_df.set_index("Jogador"))
 
-    # Aba 4: Faltas Cometidas
     with tab_fouls_c:
         st.header("💪 Maiores Faltosos")
-        st.caption(
-            "Jogadores ranqueados por faltas cometidas por jogo."
+        st.caption("Jogadores ranqueados por faltas cometidas por jogo.")
+        data = fetch_data(
+            get_top_fouls_committed,
+            league_id=LEAGUE_ID, season=SEASON,
+            limit=top_n, min_appearances=min_apps,
         )
-        data = fetch_data("/players/top-fouls-committed", params)
         render_player_table(data, {
             "Faltas": "fouls_committed",
             "Amarelos": "yellow_cards",
@@ -288,25 +262,21 @@ def main():
             "Desarmes": "tackles",
             "Faltas/Jogo": "fouls_per_game",
         })
-
         if data:
             st.subheader("📊 Distribuicao de Faltas por Jogo")
-            chart_df = pd.DataFrame(data)
-            chart_df = chart_df[["player", "fouls_per_game"]].rename(
-                columns={
-                    "player": "Jogador",
-                    "fouls_per_game": "Faltas/Jogo",
-                }
+            chart_df = pd.DataFrame(data)[["player", "fouls_per_game"]].rename(
+                columns={"player": "Jogador", "fouls_per_game": "Faltas/Jogo"}
             )
             st.bar_chart(chart_df.set_index("Jogador"))
 
-    # Aba 5: Faltas Sofridas
     with tab_fouls_d:
         st.header("🤕 Mais Sofrem Faltas")
-        st.caption(
-            "Jogadores ranqueados por faltas sofridas por jogo."
+        st.caption("Jogadores ranqueados por faltas sofridas por jogo.")
+        data = fetch_data(
+            get_top_fouls_drawn,
+            league_id=LEAGUE_ID, season=SEASON,
+            limit=top_n, min_appearances=min_apps,
         )
-        data = fetch_data("/players/top-fouls-drawn", params)
         render_player_table(data, {
             "Faltas Sofridas": "fouls_drawn",
             "Dribles Tent.": "dribble_attempts",
@@ -314,51 +284,33 @@ def main():
             "Penaltis Ganhos": "penalties_won",
             "Faltas Sofr./Jogo": "fouls_drawn_per_game",
         })
-
         if data:
             st.subheader("📊 Distribuicao de Faltas Sofridas por Jogo")
-            chart_df = pd.DataFrame(data)
-            chart_df = chart_df[["player", "fouls_drawn_per_game"]].rename(
-                columns={
-                    "player": "Jogador",
-                    "fouls_drawn_per_game": "Faltas Sofr./Jogo",
-                }
+            chart_df = pd.DataFrame(data)[["player", "fouls_drawn_per_game"]].rename(
+                columns={"player": "Jogador", "fouls_drawn_per_game": "Faltas Sofr./Jogo"}
             )
             st.bar_chart(chart_df.set_index("Jogador"))
 
-    # Aba 6: Todos os Jogadores
     with tab_all:
         st.header("📋 Todos os Jogadores")
-
         search = st.text_input("🔍 Buscar jogador por nome", "")
-        all_params = {
-            "league_id": LEAGUE_ID,
-            "season": SEASON,
-            "limit": 100,
-            "offset": 0,
-        }
-        if search:
-            all_params["search"] = search
-
-        data = fetch_data("/players", all_params)
+        data = fetch_data(
+            get_all_players,
+            league_id=LEAGUE_ID, season=SEASON,
+            limit=100, offset=0,
+            search=search if search else None,
+        )
         if data:
             df = pd.DataFrame(data)
             col_rename = {
-                "player": "jogador",
-                "team": "time",
-                "position": "posicao",
-                "nationality": "nacionalidade",
-                "age": "idade",
-                "appearances": "jogos",
-                "goals": "gols",
-                "assists": "assistencias",
-                "yellow_cards": "cartoes_amarelos",
+                "player": "jogador", "team": "time", "position": "posicao",
+                "nationality": "nacionalidade", "age": "idade",
+                "appearances": "jogos", "goals": "gols",
+                "assists": "assistencias", "yellow_cards": "cartoes_amarelos",
                 "red_cards": "cartoes_vermelhos",
                 "fouls_committed": "faltas_cometidas",
-                "fouls_drawn": "faltas_sofridas",
-                "shots": "finalizacoes",
-                "key_passes": "passes_chave",
-                "tackles": "desarmes",
+                "fouls_drawn": "faltas_sofridas", "shots": "finalizacoes",
+                "key_passes": "passes_chave", "tackles": "desarmes",
             }
             display_cols = [
                 "player", "team", "position", "nationality", "age",
@@ -368,21 +320,12 @@ def main():
             ]
             existing_cols = [c for c in display_cols if c in df.columns]
             display_df = df[existing_cols].rename(
-                columns={k: v for k, v in col_rename.items()
-                         if k in existing_cols}
+                columns={k: v for k, v in col_rename.items() if k in existing_cols}
             )
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
         else:
-            st.warning(
-                "Nenhum dado de jogador disponivel. "
-                "Verifique se o pipeline ETL foi executado."
-            )
+            st.warning("Nenhum dado de jogador disponivel.")
 
-    # Footer
     st.divider()
     st.markdown(
         "<div class='footer'>"
